@@ -1,3 +1,4 @@
+# 환경 설정 및 파일 읽기
 import os
 import nibabel as nib
 import numpy as np
@@ -68,9 +69,6 @@ for nifti_file_path in nifti_files:
         frames_folder = os.path.join(session_folder, "frames")
         os.makedirs(frames_folder, exist_ok=True)
 
-        processed_slices = []
-        num_frames = img_data.shape[-1]
-
         # BET 방법 선택
         if use_first_volume:
             print("Using the first volume for BET")
@@ -93,69 +91,78 @@ for nifti_file_path in nifti_files:
             if not os.path.exists(bet_output_path):
                 raise Exception(f"Brain extraction failed for mean volume")
 
-        
         elif use_each_frame:
+            print("Using each frame for BET")
             for frame in range(num_frames):
                 print(f"Processing frame {frame + 1}/{num_frames}...")
                 frame_data = img_data[..., frame]
                 frame_img = nib.Nifti1Image(frame_data, affine, header)
-        
+
                 # 프레임 데이터 저장
                 frame_output = os.path.join(frames_folder, f"{file_name}_frame_{frame}.nii.gz")
                 nib.save(frame_img, frame_output)
-        
+
                 # 뇌 추출 (BET from FSL)
                 brain_output = os.path.join(frames_folder, f"{file_name}_brain_{frame}.nii.gz")
                 subprocess.run(["bet", frame_output, brain_output, "-f", "0.5", "-g", "0"], check=True)
                 if not os.path.exists(brain_output):
                     raise Exception(f"Brain extraction failed for time frame {frame + 1}")
 
-        for frame in range(num_frames):
-            print(f"Processing frame {frame + 1}/{num_frames}...")
-            frame_data = img_data[..., frame]
-            frame_img = nib.Nifti1Image(frame_data, affine, header)
+                # Affine 정렬 (reg_aladin from NiftyReg)
+                affine_output = os.path.join(frames_folder, f"{file_name}_affine_{frame}.nii.gz")
+                subprocess.run(["reg_aladin", "-ref", template_path, "-flo", brain_output, "-res", affine_output], check=True)
 
-            # 프레임 데이터 저장
-            frame_output = os.path.join(frames_folder, f"{file_name}_frame_{frame}.nii.gz")
-            nib.save(frame_img, frame_output)
+                if not os.path.exists(affine_output):
+                    raise Exception(f"Affine registration failed for time frame {frame + 1}")
 
-            # 뇌 추출 (BET from FSL)
-            if use_each_frame:
-                brain_output = os.path.join(frames_folder, f"{file_name}_brain_{frame}.nii.gz")
-                subprocess.run(["bet", frame_output, brain_output, "-f", "0.5", "-g", "0"], check=True)
-                if not os.path.exists(brain_output):
-                    raise Exception(f"Brain extraction failed for time frame {frame + 1}")
+                # 비선형 정렬 (reg_f3d from NiftyReg)
+                nonlinear_output = os.path.join(frames_folder, f"{file_name}_nonlinear_{frame}.nii.gz")
+                subprocess.run(["reg_f3d", "-ref", template_path, "-flo", affine_output, "-res", nonlinear_output], check=True)
 
-            # Affine 정렬 (reg_aladin from NiftyReg)
-            affine_output = os.path.join(frames_folder, f"{file_name}_affine_{frame}.nii.gz")
-            subprocess.run(["reg_aladin", "-ref", template_path, "-flo", brain_output if use_each_frame else bet_output_path, "-res", affine_output], check=True)
+                if not os.path.exists(nonlinear_output):
+                    raise Exception(f"Nonlinear registration failed for time frame {frame + 1}")
 
-            if not os.path.exists(affine_output):
-                raise Exception(f"Affine registration failed for time frame {frame + 1}")
+                # 처리된 슬라이스 추가
+                processed_slices.append(nib.load(nonlinear_output).get_fdata())
 
-            # 비선형 정렬 (reg_f3d from NiftyReg)
-            nonlinear_output = os.path.join(frames_folder, f"{file_name}_nonlinear_{frame}.nii.gz")
-            subprocess.run(["reg_f3d", "-ref", template_path, "-flo", affine_output, "-res", nonlinear_output], check=True)
-
-            if not os.path.exists(nonlinear_output):
-                raise Exception(f"Nonlinear registration failed for time frame {frame + 1}")
-
-            # 비뇌 영역 제거
-            brain_mask_output = os.path.join(frames_folder, f"{file_name}_mask_{frame}.nii.gz")
-            resampled_brain_img = image.resample_to_img(brain_output if use_each_frame else bet_output_path, nonlinear_output)
-            brain_mask = masking.compute_brain_mask(resampled_brain_img)
-            brain_img_slice = image.math_img("img * mask", img=resampled_brain_img, mask=brain_mask)
-            nib.save(brain_img_slice, brain_mask_output)
-
-            # 처리된 슬라이스 추가
-            processed_slices.append(nib.load(brain_mask_output).get_fdata())
-
-            # 임시 파일 삭제
-            os.remove(frame_output)
-            if use_each_frame:
+                # 임시 파일 삭제
+                os.remove(frame_output)
                 os.remove(brain_output)
-            os.remove(affine_output)
-            os.remove(nonlinear_output)
+                os.remove(affine_output)
+                os.remove(nonlinear_output)
+
+        # 각 프레임에 대해 BET를 수행하지 않는 경우 추가 처리
+        if use_first_volume or use_mean_volume:
+            for frame in range(num_frames):
+                print(f"Processing frame {frame + 1}/{num_frames}...")
+                frame_data = img_data[..., frame]
+                frame_img = nib.Nifti1Image(frame_data, affine, header)
+
+                # 프레임 데이터 저장
+                frame_output = os.path.join(frames_folder, f"{file_name}_frame_{frame}.nii.gz")
+                nib.save(frame_img, frame_output)
+
+                # Affine 정렬 (reg_aladin from NiftyReg)
+                affine_output = os.path.join(frames_folder, f"{file_name}_affine_{frame}.nii.gz")
+                subprocess.run(["reg_aladin", "-ref", template_path, "-flo", bet_output_path, "-res", affine_output], check=True)
+
+                if not os.path.exists(affine_output):
+                    raise Exception(f"Affine registration failed for time frame {frame + 1}")
+
+                # 비선형 정렬 (reg_f3d from NiftyReg)
+                nonlinear_output = os.path.join(frames_folder, f"{file_name}_nonlinear_{frame}.nii.gz")
+                subprocess.run(["reg_f3d", "-ref", template_path, "-flo", affine_output, "-res", nonlinear_output], check=True)
+
+                if not os.path.exists(nonlinear_output):
+                    raise Exception(f"Nonlinear registration failed for time frame {frame + 1}")
+
+                # 처리된 슬라이스 추가
+                processed_slices.append(nib.load(nonlinear_output).get_fdata())
+
+                # 임시 파일 삭제
+                os.remove(frame_output)
+                os.remove(affine_output)
+                os.remove(nonlinear_output)
 
         # 4D NIfTI 파일로 결합
         processed_data = np.stack(processed_slices, axis=-1)
